@@ -1,192 +1,131 @@
-const Express = require('express');
-const CORS = require('cors');
-const UserModel = require('./models/UserSchema');
-const ExerciseModel = require('./models/ExerciseSchema');
-const LogModel = require('./models/LogSchema');
-require('dotenv').config()
-require('./config/db.config').connectDB();
+// .env file can hold PORT / MONGO_URI variable if desired
+require('dotenv').config();
 
-const App = Express();
+const express = require('express');
+const bodyParser = require('body-parser');
+const cors = require('cors');
 
-App.use(CORS());
-App.use(Express.urlencoded(
-    {
-        extended: false
-    }
-));
-App.use(Express.json());
-App.use(Express.static('public'));
+const {
+  createUser,
+  getUserById,
+  getAllUsers,
+  createExercise,
+  getFilteredExercisesByUserId: getAllExerciseByUserId,
+} = require('./middleware/middleware');
 
-App.get('/', (req, res) => {
-    res.sendFile(__dirname + '/views/index.html')
+const app = express();
+
+const formatDate = (date) => {
+  // Alternate possibility to avoid time zone translations:
+  // return new Date(date).toUTCString().slice(0, 16)
+
+  // Required to pass FCC tests
+  return new Date(date).toDateString();
+};
+
+// Log incoming requests in development:
+if (process.env.RUN_MODE === 'development') {
+  app.use((req, res, next) => {
+    console.log(
+      `${req.method} ${req.path}; IP=${req.ip}; https?=${req.secure}`,
+    );
+    next();
+  });
+}
+
+// enable CORS (https://en.wikipedia.org/wiki/Cross-origin_resource_sharing)
+// so that your API is remotely testable by FCC
+app.use(cors());
+
+// Parse url encoded bodies:
+app.use(bodyParser.urlencoded({ extended: false }));
+
+// Serve static files from 'public' folder
+// http://expressjs.com/en/starter/static-files.html
+app.use('/public', express.static('public'));
+
+// Send index.html on requests to root
+// http://expressjs.com/en/starter/basic-routing.html
+app.get('/', (req, res) => {
+  res.sendFile(__dirname + '/views/index.html');
 });
 
-// saving a user in the database
-App.post('/api/users', (req, res) => {
-    const user_obj = new UserModel({
-        username: req.body.username
-    });
-
-    user_obj.save((err, new_user) => {
-        if (err) {
-            res.status(500).json({
-                error: err.message
-            });
-        }
-        else {
-            res.json(new_user);
-        }
-    });
+// GET request to `/api/users` shows all users:
+app.get('/api/users', getAllUsers, (req, res) => {
+  return res.json(res.locals.userDocumentArray);
 });
 
-// get all users
-App.get('/api/users', (req, res) => {
-    UserModel.find((err, all_users) => {
-        if (err) {
-            res.status(500).json({
-                error: err.message
-            })
-        }
-        else {
-            res.json(all_users);
-        }
-    });
+// POST request to `/api/users` to create a new user:
+app.post('/api/users', createUser, (req, res) => {
+  const { _id, username } = res.locals.userDocument;
+  return res.json({ _id, username });
 });
 
-// save exercises for the specified user
-App.post('/api/users/:_id/exercises', (req, res) => {
-    const user_id = req.params._id;
+// GET request to `/api/users/:id/logs` returns full exercise log of user
+app.get(
+  '/api/users/:_id/logs',
+  getUserById,
+  getAllExerciseByUserId,
+  (req, res) => {
+    // Process Exercise documents into log:
+    const log = res.locals.exerciseDocumentArray.map(
+      ({ description, duration, date }) => ({
+        description,
+        duration,
+        date: formatDate(date),
+      }),
+    );
 
-    UserModel.findById(user_id, (err, user) => {
-        if (err) {
-            res.status(404).send('User Not Found!');
-        }
-        else {
-            let date_input;
+    const count = log.length;
+    const { _id, username } = res.locals.userDocument;
 
-            if (req.body.date === "") { 
-                date_input = new Date(Date.now());
-            }
-            else { 
-                date_input = new Date(req.body.date);
-            }
-
-            const exercise_obj = new ExerciseModel({
-                user_id: user._id,
-                username: user.username,
-                description: req.body.description,
-                duration: req.body.duration,
-                date: date_input
-            });
-
-            exercise_obj.save((err, new_exercise) => {
-                if (err) {
-                    res.status(500).json({
-                        error: err.message
-                    })
-                }
-                else {
-                    LogModel.findById(new_exercise.user_id, (err, log) => {
-                        if (err) {
-                            res.status(500).json({
-                                error: err.message
-                            });
-                        }
-                        if (log === null) {
-                            let old_count = 0;
-
-                            const log_obj = new LogModel({
-                                _id: new_exercise.user_id,
-                                username: new_exercise.username,
-                                count: ++old_count,
-                                log: [{
-                                    description: new_exercise.description,
-                                    duration: new_exercise.duration,
-                                    date: new_exercise.date
-                                }]
-                            });
-
-                            log_obj.save((err, new_log) => {
-                                if (err) {
-                                    res.status(400).send('Bad Request Cannot Create Log!');
-                                }
-                            });
-                        }
-                        else {
-                            ExerciseModel.find({ user_id: new_exercise.user_id }, (err, docs) => {
-                                if (err) {
-                                    res.status(500).json({
-                                        error: err.message
-                                    });
-                                }
-                                else {
-                                    const log_arr = docs.map((exerciseObj) => {
-                                        return {
-                                            description: exerciseObj.description,
-                                            duration: exerciseObj.duration,
-                                            date: exerciseObj.date
-                                        }
-                                    });
-
-                                    const new_count = log_arr.length;
-
-                                    LogModel.findByIdAndUpdate(new_exercise.user_id, {
-                                        count: new_count,
-                                        log: log_arr
-                                    }, (err, updated_log) => {
-                                        if (err) {
-                                            res.json(400).send('Unable to Update Log. Bad Request');
-                                        }
-                                    });
-                                }
-                            });
-                        }
-                    });
-
-                    res.json({
-                        _id: new_exercise.user_id,
-                        username: new_exercise.username,
-                        description: new_exercise.description,
-                        duration: new_exercise.duration,
-                        date: new Date(new_exercise.date).toDateString()
-                    });
-                }
-            });
-        }
+    return res.json({
+      _id,
+      username,
+      filters: {
+        from: req.query.from || 'any',
+        to: req.query.to || 'any',
+        limit: parseInt(req.query.limit) || 'all',
+      },
+      count,
+      log,
     });
-});
-
-// access all logs of any user
-App.get('/api/users/:_id/logs', (req, res) => {
-    LogModel.findById(req.params._id, (err, user_log) => {
-        if (err) {
-            res.status(500).json({
-                error: err.message
-            });
-        }
-        if (user_log === null) {
-            res.status(404).send('User Log Not Found!');
-        }
-        else {
-            const log_obj = user_log.log.map((obj) => {
-                return {
-                    description: obj.description,
-                    duration: obj.duration,
-                    date: new Date(obj.date).toDateString()
-                }
-            });
-
-            res.json({
-                _id: user_log._id,
-                username: user_log.username,
-                count: user_log.count,
-                log: log_obj
-            })
-        }
-    });
-});
-
-const CONN_PORT = process.env.PORT || 3000;
-App.listen(CONN_PORT,
-    () => console.log(`Your App is Listening at http://localhost:${CONN_PORT}`)
+  },
 );
+
+// POST request to `/api/users/:id/exercises` creates a new exercise document
+app.post(
+  '/api/users/:_id(\\w+)/exercises',
+  getUserById,
+  createExercise,
+  (req, res) => {
+    const { _id, username } = res.locals.userDocument;
+    const { description, duration, date } = res.locals.exerciseDocument;
+
+    return res.json({
+      _id,
+      username,
+      description,
+      duration,
+      date: formatDate(date),
+    });
+  },
+);
+
+// 404 page not found:
+app.get('*', (req, res) => {
+  // Redirect to index
+  res.redirect('/');
+});
+
+// Internal Error Handler:
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).send('Internal Server error: See Server Logs');
+});
+
+// Have server listen on PORT or default to 3000
+// http://localhost:3000/
+const listener = app.listen(process.env.PORT || 3000, () => {
+  console.log('Your app is listening on port ' + listener.address().port);
+});
