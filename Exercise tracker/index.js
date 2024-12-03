@@ -1,217 +1,192 @@
-const express = require('express');
-const app = express();
-const bodyParser = require('body-parser');
+const Express = require('express');
+const CORS = require('cors');
+const UserModel = require('./models/UserSchema');
+const ExerciseModel = require('./models/ExerciseSchema');
+const LogModel = require('./models/LogSchema');
+require('dotenv').config()
+require('./config/db.config').connectDB();
 
-const cors = require('cors');
+const App = Express();
 
-const mongoose = require('mongoose');
-mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+App.use(CORS());
+App.use(Express.urlencoded(
+    {
+        extended: false
+    }
+));
+App.use(Express.json());
+App.use(Express.static('public'));
 
-app.use(cors());
-
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
-
-app.use('/public', express.static(process.cwd() + '/public'));
-
-app.get('/', (req, res) => {
-	res.sendFile(__dirname + '/views/index.html');
+App.get('/', (req, res) => {
+    res.sendFile(__dirname + '/views/index.html')
 });
 
-var Schema = mongoose.Schema;
+// saving a user in the database
+App.post('/api/users', (req, res) => {
+    const user_obj = new UserModel({
+        username: req.body.username
+    });
 
-var exerciseUsersSchema = new Schema({
-	username: { type: String, unique: true, required: true }
+    user_obj.save((err, new_user) => {
+        if (err) {
+            res.status(500).json({
+                error: err.message
+            });
+        }
+        else {
+            res.json(new_user);
+        }
+    });
 });
 
-var ExerciseUsers = mongoose.model('ExerciseUsers', exerciseUsersSchema);
-
-var exercisesSchema = new Schema({
-	userId: { type: String, required: true },
-	description: { type: String, required: true },
-	duration: { type: Number, min: 1, required: true },
-	date: { type: Date, default: Date.now }
+// get all users
+App.get('/api/users', (req, res) => {
+    UserModel.find((err, all_users) => {
+        if (err) {
+            res.status(500).json({
+                error: err.message
+            })
+        }
+        else {
+            res.json(all_users);
+        }
+    });
 });
 
-var Exercises = mongoose.model('Exercises', exercisesSchema);
+// save exercises for the specified user
+App.post('/api/users/:_id/exercises', (req, res) => {
+    const user_id = req.params._id;
 
-app.post('/api/users', function (req, res) {
-	if (req.body.username === '') {
-		return res.json({ error: 'username is required' });
-	}
+    UserModel.findById(user_id, (err, user) => {
+        if (err) {
+            res.status(404).send('User Not Found!');
+        }
+        else {
+            let date_input;
 
-	let username = req.body.username;
-	let _id = '';
+            if (req.body.date === "") { 
+                date_input = new Date(Date.now());
+            }
+            else { 
+                date_input = new Date(req.body.date);
+            }
 
-	ExerciseUsers.findOne({ username: username }, function (err, data) {
-		if (!err && data === null) {
-			let newUser = new ExerciseUsers({
-				username: username
-			});
+            const exercise_obj = new ExerciseModel({
+                user_id: user._id,
+                username: user.username,
+                description: req.body.description,
+                duration: req.body.duration,
+                date: date_input
+            });
 
-			newUser.save(function (err, data) {
-				if (!err) {
-					_id = data['_id'];
+            exercise_obj.save((err, new_exercise) => {
+                if (err) {
+                    res.status(500).json({
+                        error: err.message
+                    })
+                }
+                else {
+                    LogModel.findById(new_exercise.user_id, (err, log) => {
+                        if (err) {
+                            res.status(500).json({
+                                error: err.message
+                            });
+                        }
+                        if (log === null) {
+                            let old_count = 0;
 
-					return res.json({
-						_id: _id,
-						username: username
-					});
-				}
-			});
-		} else {
-			return res.json({ error: 'username already exists' });
-		}
-	});
+                            const log_obj = new LogModel({
+                                _id: new_exercise.user_id,
+                                username: new_exercise.username,
+                                count: ++old_count,
+                                log: [{
+                                    description: new_exercise.description,
+                                    duration: new_exercise.duration,
+                                    date: new_exercise.date
+                                }]
+                            });
+
+                            log_obj.save((err, new_log) => {
+                                if (err) {
+                                    res.status(400).send('Bad Request Cannot Create Log!');
+                                }
+                            });
+                        }
+                        else {
+                            ExerciseModel.find({ user_id: new_exercise.user_id }, (err, docs) => {
+                                if (err) {
+                                    res.status(500).json({
+                                        error: err.message
+                                    });
+                                }
+                                else {
+                                    const log_arr = docs.map((exerciseObj) => {
+                                        return {
+                                            description: exerciseObj.description,
+                                            duration: exerciseObj.duration,
+                                            date: exerciseObj.date
+                                        }
+                                    });
+
+                                    const new_count = log_arr.length;
+
+                                    LogModel.findByIdAndUpdate(new_exercise.user_id, {
+                                        count: new_count,
+                                        log: log_arr
+                                    }, (err, updated_log) => {
+                                        if (err) {
+                                            res.json(400).send('Unable to Update Log. Bad Request');
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    });
+
+                    res.json({
+                        _id: new_exercise.user_id,
+                        username: new_exercise.username,
+                        description: new_exercise.description,
+                        duration: new_exercise.duration,
+                        date: new Date(new_exercise.date).toDateString()
+                    });
+                }
+            });
+        }
+    });
 });
 
-app.get('/api/users', function (req, res) {
-	ExerciseUsers.find({}, function (err, data) {
-		if (!err) {
-			return res.json(data);
-		}
-	});
+// access all logs of any user
+App.get('/api/users/:_id/logs', (req, res) => {
+    LogModel.findById(req.params._id, (err, user_log) => {
+        if (err) {
+            res.status(500).json({
+                error: err.message
+            });
+        }
+        if (user_log === null) {
+            res.status(404).send('User Log Not Found!');
+        }
+        else {
+            const log_obj = user_log.log.map((obj) => {
+                return {
+                    description: obj.description,
+                    duration: obj.duration,
+                    date: new Date(obj.date).toDateString()
+                }
+            });
+
+            res.json({
+                _id: user_log._id,
+                username: user_log.username,
+                count: user_log.count,
+                log: log_obj
+            })
+        }
+    });
 });
 
-app.post('/api/users/:_id/exercises', function (req, res) {
-	if (req.params._id === '0') {
-		return res.json({ error: '_id is required' });
-	}
-
-	if (req.body.description === '') {
-		return res.json({ error: 'description is required' });
-	}
-
-	if (req.body.duration === '') {
-		return res.json({ error: 'duration is required' });
-	}
-
-	let userId = req.params._id;
-	let description = req.body.description;
-	let duration = parseInt(req.body.duration);
-	let date = (req.body.date !== undefined ? new Date(req.body.date) : new Date());
-
-	if (isNaN(duration)) {
-		return res.json({ error: 'duration is not a number' });
-	}
-
-	if (date == 'Invalid Date') {
-		return res.json({ error: 'date is invalid' });
-	}
-
-	ExerciseUsers.findById(userId, function (err, data) {
-		if (!err && data !== null) {
-			let newExercise = new Exercises({
-				userId: userId,
-				description: description,
-				duration: duration,
-				date: date
-			});
-
-			newExercise.save(function (err2, data2) {
-				if (!err2) {
-					return res.json({
-						_id: data['_id'],
-						username: data['username'],
-						description: data2['description'],
-						duration: data2['duration'],
-						date: new Date(data2['date']).toDateString()
-					});
-				}
-			});
-		} else {
-			return res.json({ error: 'user not found' });
-		}
-	});
-});
-
-app.get('/api/users/:_id/exercises', function (req, res) {
-	res.redirect('/api/users/' + req.params._id + '/logs');
-});
-
-app.get('/api/users/:_id/logs', function (req, res) {
-	let userId = req.params._id;
-	let findConditions = { userId: userId };
-
-	if (
-		(req.query.from !== undefined && req.query.from !== '')
-		||
-		(req.query.to !== undefined && req.query.to !== '')
-	) {
-		findConditions.date = {};
-
-		if (req.query.from !== undefined && req.query.from !== '') {
-			findConditions.date.$gte = new Date(req.query.from);
-		}
-
-		if (findConditions.date.$gte == 'Invalid Date') {
-			return res.json({ error: 'from date is invalid' });
-		}
-
-		if (req.query.to !== undefined && req.query.to !== '') {
-			findConditions.date.$lte = new Date(req.query.to);
-		}
-
-		if (findConditions.date.$lte == 'Invalid Date') {
-			return res.json({ error: 'to date is invalid' });
-		}
-	}
-
-	let limit = (req.query.limit !== undefined ? parseInt(req.query.limit) : 0);
-
-	if (isNaN(limit)) {
-		return res.json({ error: 'limit is not a number' });
-	}
-
-	ExerciseUsers.findById(userId, function (err, data) {
-		if (!err && data !== null) {
-			Exercises.find(findConditions).sort({ date: 'asc' }).limit(limit).exec(function (err2, data2) {
-				if (!err2) {
-					return res.json({
-						_id: data['_id'],
-						username: data['username'],
-						log: data2.map(function (e) {
-							return {
-								description: e.description,
-								duration: e.duration,
-								date: new Date(e.date).toDateString()
-							};
-						}),
-						count: data2.length
-					});
-				}
-			});
-		} else {
-			return res.json({ error: 'user not found' });
-		}
-	});
-});
-
-// Not found middleware
-app.use((req, res, next) => {
-	return next({ status: 404, message: 'not found' });
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-	let errCode, errMessage;
-
-	if (err.errors) {
-		// mongoose validation error
-		errCode = 400; // bad request
-		const keys = Object.keys(err.errors);
-		// report the first validation error
-		errMessage = err.errors[keys[0]].message;
-	} else {
-		// generic or custom error
-		errCode = err.status || 500;
-		errMessage = err.message || 'Internal Server Error';
-	}
-
-	res.status(errCode).type('txt')
-		.send(errMessage);
-});
-
-const listener = app.listen(process.env.PORT || 3000, () => {
-	console.log('Your app is listening on port ' + listener.address().port);
-});
+const CONN_PORT = process.env.PORT || 3000;
+App.listen(CONN_PORT,
+    () => console.log(`Your App is Listening at http://localhost:${CONN_PORT}`)
+);
